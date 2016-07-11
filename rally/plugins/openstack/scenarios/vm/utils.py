@@ -196,7 +196,7 @@ class VMScenario(nova_utils.NovaScenario, cinder_utils.CinderScenario):
     def _wait_for_ssh(self, ssh, timeout=120, interval=1):
         ssh.wait(timeout, interval)
 
-    @atomic.action_timer("vm.wait_for_ping")
+    @atomic.action_timer("vm._wait_for_ping")
     def _wait_for_ping(self, server_ip):
         server = Host(server_ip)
         utils.wait_for_status(
@@ -234,3 +234,62 @@ class VMScenario(nova_utils.NovaScenario, cinder_utils.CinderScenario):
                            pkey=pkey, password=password)
         self._wait_for_ssh(ssh, timeout, interval)
         return self._run_command_over_ssh(ssh, command)
+
+    @staticmethod
+    def _ping_ip_address(host):
+        """Check ip address that it is pingable.
+
+        :param host: instance of `netaddr.IPAddress`
+        """
+        ping = "ping" if host.version == 4 else "ping6"
+        if sys.platform.startswith("linux"):
+            cmd = [ping, "-c1", "-w1", str(host)]
+        else:
+            cmd = [ping, "-c1", str(host)]
+
+        proc = subprocess.Popen(cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        proc.wait()
+        LOG.debug("Host %s is ICMP %s"
+                  % (host, proc.returncode and "down" or "up"))
+        return (Host.ICMP_UP_STATUS if (proc.returncode == 0)
+                else Host.ICMP_DOWN_STATUS)
+
+    @atomic.action_timer("vm.wait_for_ping")
+    def _wait_for_ping_windows(self, server_ip):
+        server = Host(server_ip)
+        utils.wait_for_status(
+            server,
+            ready_statuses=[Host.ICMP_UP_STATUS],
+            update_resource=Host.update_status,
+            timeout=CONF.benchmark.vm_ping_timeout,
+            check_interval=CONF.benchmark.vm_ping_poll_interval
+        )
+        LOG.debug("Server is up, waiting to be down...")
+        utils.wait_for_status(
+            server,
+            ready_statuses=[Host.ICMP_DOWN_STATUS],
+            update_resource=Host.update_status,
+            timeout=CONF.benchmark.vm_ping_timeout,
+            check_interval=CONF.benchmark.vm_ping_poll_interval
+        )
+        LOG.debug("Server is down, waiting to be up...")
+        utils.wait_for_status(
+            server,
+            ready_statuses=[Host.ICMP_UP_STATUS],
+            update_resource=Host.update_status,
+            timeout=CONF.benchmark.vm_ping_timeout,
+            check_interval=CONF.benchmark.vm_ping_poll_interval
+        )
+
+    @atomic.action_timer("vm.wait_for_ping")
+    def _wait_for_ping_linux(self, server_ip):
+        server = Host(server_ip)
+        utils.wait_for(
+            server,
+            ready_statuses=[Host.ICMP_UP_STATUS],
+            update_resource=Host.update_status,
+            timeout=CONF.benchmark.vm_ping_timeout,
+            check_interval=CONF.benchmark.vm_ping_poll_interval
+        )

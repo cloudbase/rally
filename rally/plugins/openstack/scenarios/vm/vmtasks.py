@@ -15,9 +15,12 @@
 
 import json
 import pkgutil
+import tempfile
+import time
 
 from rally.common import logging
 from rally.common import sshutils
+from rally.common import winrmutils
 from rally import consts
 from rally import exceptions
 from rally.plugins.openstack import scenario
@@ -311,3 +314,121 @@ class VMTasks(vm_utils.VMScenario):
                           "cols": ["key", "value"],
                           "rows": rows}}
         )
+
+    @types.convert(image={"type": "glance_image"},
+                   flavor={"type": "nova_flavor"})
+    @validation.number("port", minval=1, maxval=65535, nullable=True,
+                       integer_only=True)
+    @validation.external_network_exists("floating_network")
+    @validation.image_valid_on_flavor("flavor", "image")
+    @validation.required_contexts("network")
+    @validation.required_services(consts.Service.NOVA)
+    @validation.required_openstack(users=True)
+    @scenario.configure(context={"cleanup": ["nova"], "keypair": {},
+                                 "allow_ssh": {}})
+    def windows_performance_test(self, image, flavor,
+                                 username,
+                                 password=None,
+                                 use_floating_ip=True,
+                                 floating_network=None,
+                                 force_delete=False,
+                                 password_sleep_interval=1,
+                                 file_size=10,
+                                 random_string_size=2,
+                                 retry_count_winrm=120,
+                                 **kwargs):
+        user_data = (
+            '#ps1\n'
+            'Get-NetConnectionProfile | Set-NetConnectionProfile '
+            '-NetworkCategory Private\n'
+            'netsh firewall set opmode mode=disable profile=all\n'
+            'Start-Service winrm\n'
+            'winrm quickconfig -q\n'
+            'winrm set winrm/config/service \'@{AllowUnencrypted="true"}\'\n'
+            'winrm set winrm/config/winrs \'@{MaxMemoryPerShellMB="%s"}\''
+            % ((random_string_size + 1) * 1024))
+        # We need to set the MaxMemoryPerShell in order to be able to
+        # use a higher number for the memory test
+
+        server, fip = self._boot_server_with_fip(
+            image, flavor, use_floating_ip=use_floating_ip,
+            floating_network=floating_network,
+            key_name=self.context["user"]["keypair"]["name"],
+            userdata=user_data,
+            **kwargs)
+
+        self._wait_for_ping_windows(fip['ip'])
+
+        private_key = self.context["user"]["keypair"]["private"]
+        password = ''
+        nova = self.clients("nova")
+        with tempfile.NamedTemporaryFile() as ntf:
+            ntf.write(private_key)
+            ntf.flush()
+            while not password:
+                password = nova.servers.get_password(server.id,
+                                                     ntf.name)
+                if password:
+                    LOG.debug("Password was found: %s" % password)
+                else:
+                    LOG.debug("Password was not found, retrying...")
+                    time.sleep(password_sleep_interval)
+            ntf.close()
+
+        retry_count = retry_count_winrm
+        winrm_client = winrmutils.WinrmClient(
+            server_ip=fip['ip'],
+            username=username,
+            password=password)
+        while True:
+            try:
+                # Test the winrm connection by running a simple command
+                winrm_client.run_ps('ls')
+                break
+            except winrmutils.winrm.exceptions.InvalidCredentialsError:
+                retry_count = retry_count - 1
+                if retry_count == 0:
+                    raise
+                time.sleep(1)
+
+        self.scripts_path = vm_utils.__file__
+        self.scripts_path = self.scripts_path[0:self.scripts_path.rfind("/")]
+        self.scripts_path += "/ps_scripts"
+
+        # Filesize is in GB
+        def job_1(self, winrm_client, file_size):
+            f = open(self.scripts_path + '/create_large_file.ps1')
+            script = f.read()
+            script = script % {'max_size': file_size}
+            LOG.debug("Running script:\n%s" % script)
+            with atomic.ActionTimer(
+                    self,
+                    "Create a large random file (size: %sGB)" % file_size):
+                winrm_client.run_powershell(script)
+
+        def job_2(self, winrm_client):
+            f = open(self.scripts_path + '/create_zip_file.ps1')
+            script = f.read()
+            LOG.debug("Running script:\n%s" % script)
+            with atomic.ActionTimer(
+                    self,
+                    "Create a zip file using the previous file"):
+                winrm_client.run_powershell(script)
+
+        # Random string size is in GB
+        def job_3(self, winrm_client):
+            f = open(self.scripts_path + '/generate_random_string.ps1')
+            script = f.read()
+            script = script % {'max_size': random_string_size}
+            LOG.debug("Running script:\n%s" % script)
+            with atomic.ActionTimer(
+                    self,
+                    ("Generate a %sGB random string in memory "
+                     "(to stress memory IO)" % random_string_size)):
+                winrm_client.run_powershell(script)
+
+        job_1(self, winrm_client, file_size)
+        job_2(self, winrm_client)
+        job_3(self, winrm_client)
+
+        self._delete_server_with_fip(server, fip, force_delete=force_delete)
