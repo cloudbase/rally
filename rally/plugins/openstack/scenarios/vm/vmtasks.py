@@ -306,3 +306,36 @@ class RuncommandHeat(vm_utils.VMScenario):
                           "cols": ["key", "value"],
                           "rows": rows}}
         )
+
+
+@types.convert(image={"type": "glance_image"},
+               flavor={"type": "nova_flavor"})
+@validation.image_valid_on_flavor("flavor", "image")
+@validation.external_network_exists("floating_network")
+@validation.required_services(consts.Service.NOVA, consts.Service.NEUTRON)
+@validation.required_openstack(users=True)
+@scenario.configure(context={"cleanup": ["nova"], "keypair": {},
+                             "allow_ssh": {}},
+                    name="VMTasks.boot_ssh_delete_server")
+class BootSSHDeleteServer(vm_utils.VMScenario):
+
+    def __init__(self, *args, **kwargs):
+        super(BootSSHDeleteServer, self).__init__(*args, **kwargs)
+
+    def run(self, image, flavor, username, password=None,
+            floating_network=None, port=22, use_floating_ip=True,
+            force_delete=False, wait_for_ping=True,
+            max_log_length=None, **kwargs):
+        """Boots a server and waits for SSH connection."""
+        server, fip = self._boot_server_with_fip(
+            image, flavor, use_floating_ip=use_floating_ip,
+            floating_network=floating_network,
+            key_name=self.context["user"]["keypair"]["name"],
+            **kwargs)
+
+        pkey = self.context["user"]["keypair"]["private"]
+        ssh = sshutils.SSH(username, fip["ip"], port=port,
+                           pkey=pkey, password=password)
+        self._wait_for_ssh(ssh)
+
+        self._delete_server_with_fip(server, fip, force_delete=force_delete)
