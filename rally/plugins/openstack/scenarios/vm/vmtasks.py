@@ -339,3 +339,75 @@ class BootSSHDeleteServer(vm_utils.VMScenario):
         self._wait_for_ssh(ssh)
 
         self._delete_server_with_fip(server, fip, force_delete=force_delete)
+
+
+@types.convert(image={"type": "glance_image"},
+               flavor={"type": "nova_flavor"})
+@validation.number("port", minval=1, maxval=65535, nullable=True,
+                   integer_only=True)
+@validation.image_valid_on_flavor("flavor", "image")
+@validation.external_network_exists("floating_network")
+@validation.required_services(consts.Service.NOVA, consts.Service.NEUTRON)
+@validation.required_openstack(users=True)
+@scenario.configure(context={"cleanup": ["nova"], "keypair": {},
+                             "allow_ssh": {}},
+                    name="VMTasks.create_launch_job_sequence")
+class HadoopJobsSequence(vm_utils.VMScenario):
+
+    def __init__(self, *args, **kwargs):
+        super(HadoopJobsSequence, self).__init__(*args, **kwargs)
+
+    def run(self, image, flavor, username, jobs, use_floating_ip=True,
+            floating_network=None, force_delete=False, retry_interval=1,
+            **kwargs):
+        glance = self.clients("glance")
+        os_distro = glance.images.get(image).properties.get('os_distro')
+        if os_distro is None:
+            raise Exception("Please set os distro for image %(image)s,"
+                            " currently is set to %(os_distro)s" %
+                            {'image': image, 'os_distro': os_distro})
+        if os_distro != 'windows' and os_distro != 'ubuntu':
+            raise Exception("Supported os_distro: windows and ubuntu")
+
+        server, fip = self._boot_server_with_fip(
+            image, flavor, use_floating_ip=use_floating_ip,
+            floating_network=floating_network,
+            key_name=self.context["user"]["keypair"]["name"],
+            **kwargs)
+        private_key = self.context["user"]["keypair"]["private"]
+        password = None
+
+        if os_distro == 'windows':
+            self._wait_for_ping_windows(fip['ip'])
+            password = self._get_windows_password(server,
+                                                  private_key,
+                                                  retry_interval)
+        else:
+            self._wait_for_ping_linux(fip['ip'])
+            ssh = sshutils.SSH(username, fip['ip'], port=22,
+                               pkey=private_key, password=None)
+            self._wait_for_ssh(ssh)
+
+        for idx, job in enumerate(jobs):
+            LOG.debug("Launching Job. Sequence #%d" % idx)
+            if os_distro == 'windows':
+                CMD = ('hadoop jar C:\\hadoop-examples.jar'
+                       ' %(job)s %(arg)s %(args)s')
+            else:
+                CMD = ('/usr/local/hadoop/bin/hadoop jar /usr/local/hadoop/'
+                       'share/hadoop/mapreduce/'
+                       'hadoop-mapreduce-examples-2.7.2.jar'
+                       ' %(job)s %(arg)s %(args)s')
+
+            command = CMD % {'job': job['job_name'].lower(),
+                             'arg': job['args'][0],
+                             'args': job['args'][1]}
+
+            if os_distro == 'windows':
+                self._run_job_winrm(idx, fip['ip'], username,
+                                    password, command)
+            if os_distro == 'ubuntu':
+                self._run_job_ssh(idx, fip['ip'], username,
+                                  private_key, command)
+
+        self._delete_server_with_fip(server, fip, force_delete=force_delete)
