@@ -1,0 +1,41 @@
+{% set image = image or "^cirros.*uec$" %}
+{
+    "VMTasks.create_launch_job_sequence": [
+        {
+            "args": {
+                "jobs": [
+                    {
+                        "job_name": "teragen",
+                        "args": ["10000000", "~/data_genout"]
+                    }, {
+                        "job_name": "terasort",
+                        "args": ["~/data_genout", "~/data_sortout"]
+                    }, {
+                        "job_name": "teravalidate",
+                        "args": ["~/data_sortout", "~/data_errorout"]
+                    }
+                ],
+                "flavor": {
+                    "name": "m1.medium"
+                },
+                "image": {
+                    "name": "{{image}}"
+                },
+                "floating_network": "public",
+                "username": "ubuntu"
+            },
+            "runner": {
+                "type": "constant",
+                "times": 1,
+                "concurrency": 1
+            },
+            "context": {
+                "users": {
+                    "tenants": 1,
+                    "users_per_tenant": 1
+                },
+                "network": {}
+            }
+        }
+    ]
+}
